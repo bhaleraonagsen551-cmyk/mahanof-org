@@ -55,6 +55,8 @@ export interface User {
   id: string;
   fullName: string;
   username: string;
+  // FIX: Added email to User type to match usage in API and components.
+  email: string;
   password?: string; // Should not be exposed on client-side in a real app
   membershipId: string;
   role: UserRole;

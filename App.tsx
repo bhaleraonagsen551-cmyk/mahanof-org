@@ -22,8 +22,10 @@ import Events from './components/Events';
 import NewsAndMedia from './components/dashboard/NewsAndMedia';
 import GbNotifications from './components/dashboard/GbNotifications';
 import ImageCarousel from './components/ImageCarousel';
-import { api, setAuthToken } from './utils/api';
+import { api } from './utils/api';
 import AttendanceAuthModal from './components/AttendanceAuthModal';
+import { auth } from './firebase-config';
+import { onAuthStateChanged } from 'firebase/auth';
 
 
 type Page = 'home' | 'registration' | 'login' | 'dashboard' | 'meeting';
@@ -100,7 +102,6 @@ const App: React.FC = () => {
         setIsLoading(true);
         setError(null);
         try {
-            // FIX: Replaced incorrect `create...` calls with actual data fetching calls from the API.
             const [
                 users, notificationsData, media, apps, formDefs, subs, vcs,
                 budgets, orders, outward, minutes, eventsData, queriesData
@@ -142,15 +143,10 @@ const App: React.FC = () => {
         }
     };
 
-    useEffect(() => {
-        // Fetch initial public settings on app load
+     useEffect(() => {
         const fetchSettingsAndPublicData = async () => {
-            setIsLoading(true);
             try {
-                const [settings, users] = await Promise.all([
-                    api.getSettings(),
-                    api.getUsers()
-                ]);
+                const settings = await api.getSettings();
                 setTheme(settings.theme || defaultTheme);
                 setFonts(settings.fonts || defaultFonts);
                 setLogoUrl(settings.logoUrl || '');
@@ -160,24 +156,49 @@ const App: React.FC = () => {
                 setHeroImageUrl(settings.heroImageUrl || '');
                 setAboutUsData(settings.aboutUsData || defaultAboutUsData);
                 setVisitorCount(settings.visitorCount || 0);
-                setAllUsers(users || []);
             } catch (e: any) {
                 setError('Could not load website settings.');
                 console.error(e);
-            } finally {
-                setIsLoading(false);
             }
         };
         fetchSettingsAndPublicData();
     }, []);
+
+    useEffect(() => {
+        const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+            setIsLoading(true);
+            if (firebaseUser) {
+                try {
+                    const appUser = await api.getUser(firebaseUser.uid);
+                    if (appUser) {
+                        setCurrentUser(appUser);
+                        setCurrentPage('dashboard');
+                        await fetchAllData();
+                    } else {
+                        await api.logout();
+                    }
+                } catch (e) {
+                    console.error("Failed to fetch user profile:", e);
+                    await api.logout();
+                }
+            } else {
+                setCurrentUser(null);
+                // Clear sensitive data on logout
+                setAllUsers([]);
+                setApplications([]);
+            }
+            setIsLoading(false);
+        });
+        return () => unsubscribe();
+    }, []);
+
 
     // --- Handlers (rewritten for API calls) ---
     const handleNavigate = (page: Page) => setCurrentPage(page);
 
     const handleLogin = async (username: string, password: string): Promise<{ success: boolean; message: string }> => {
         try {
-            const { token, user } = await api.login(username, password);
-            setAuthToken(token);
+            const user = await api.login(username, password);
             setCurrentUser(user);
             setCurrentPage('dashboard');
             await fetchAllData(); // Fetch all protected data after login
@@ -187,8 +208,8 @@ const App: React.FC = () => {
         }
     };
 
-    const handleLogout = () => {
-        setAuthToken(null);
+    const handleLogout = async () => {
+        await api.logout();
         setCurrentUser(null);
         setCurrentPage('home');
         // Clear all sensitive data
@@ -200,7 +221,6 @@ const App: React.FC = () => {
     const handleRegisterUser = async (data: Omit<RegistrationApplication, 'id' | 'date' | 'status'>) => {
         try {
             await api.createApplication(data);
-            // No need to update state, user sees a confirmation page.
         } catch (e) {
             console.error("Registration failed:", e);
             alert("Registration failed. Please try again.");
@@ -210,7 +230,6 @@ const App: React.FC = () => {
     const handleApproveApplication = async (appId: string) => {
         try {
             await api.approveApplication(appId);
-            // Refetch data to show the update
             const [updatedUsers, updatedApps] = await Promise.all([api.getUsers(), api.getApplications()]);
             setAllUsers(updatedUsers);
             setApplications(updatedApps);
@@ -237,14 +256,11 @@ const App: React.FC = () => {
 
     const handleSaveUser = async (user: User) => {
         try {
-            if (allUsers.some(u => u.id === user.id)) {
-                // Existing user, update it
+            if (user.id && allUsers.some(u => u.id === user.id)) {
                 await api.updateUser(user.id, user);
             } else {
-                // New user, create it
                 await api.createUser(user);
             }
-            // Refetch all users to ensure UI consistency
             const updatedUsers = await api.getUsers();
             setAllUsers(updatedUsers);
         } catch(e) {
@@ -260,32 +276,17 @@ const App: React.FC = () => {
         } catch (e) { console.error("Failed to post notification:", e); }
     };
 
-    const handleMarkAttendance = (employeeId: string, method: 'Face Recognition' | 'Fingerprint') => {
-        setAttendanceRecords(prev => {
-            const now = new Date();
-            const todayStr = now.toISOString().split('T')[0];
-            const timeStr = now.toTimeString().split(' ')[0];
-    
-            const existingRecordIndex = prev.findIndex(rec => rec.employeeId === employeeId && rec.date === todayStr);
-    
-            if (existingRecordIndex > -1) {
-                // It's a clock-out
-                const updatedRecords = [...prev];
-                updatedRecords[existingRecordIndex] = { ...updatedRecords[existingRecordIndex], clockOutTime: timeStr };
-                return updatedRecords;
-            } else {
-                // It's a clock-in
-                const newRecord: AttendanceRecord = {
-                    id: `att-${Date.now()}`,
-                    employeeId,
-                    date: todayStr,
-                    clockInTime: timeStr,
-                    status: 'Present',
-                    method,
-                };
+    const handleMarkAttendance = async (employeeId: string, method: 'Face Recognition' | 'Fingerprint') => {
+        try {
+            const newRecord = await api.markAttendance(employeeId, method);
+            setAttendanceRecords(prev => {
+                const existingIndex = prev.findIndex(r => r.id === newRecord.id);
+                if (existingIndex > -1) {
+                    return prev.map(r => r.id === newRecord.id ? newRecord : r);
+                }
                 return [newRecord, ...prev];
-            }
-        });
+            });
+        } catch (e) { console.error("Failed to mark attendance", e); }
     };
 
     // Generic handler to update settings via API
@@ -299,7 +300,6 @@ const App: React.FC = () => {
     };
 
     // All other handlers would follow a similar pattern: call API, then update state with response or refetch.
-    // For brevity, only a few are fully implemented here. The structure is the key.
     const handlePostMedia = async (item: any, type: 'news' | 'image' | 'video') => {
         const newItem = await api.createMedia(item, type);
         setMediaItems(p => [newItem, ...p]);
@@ -353,15 +353,12 @@ const App: React.FC = () => {
         setQueries(p => p.map(q => q.id === queryId ? updated : q));
     };
 
-    // Placeholder handlers for unimplemented features
     const handleJoinMeeting = (link: string) => { /* ... */ };
     const handleDownloadOrder = (orderId: string) => { /* ... */ };
 
     const renderDashboard = () => {
         if (!currentUser) return <LoginPage onLogin={handleLogin} onNavigate={() => handleNavigate('registration')} />;
         const commonDownloadProps = { logoUrl, formLogoUrl };
-        // The rest of this function remains largely the same as it passes props down
-        // to child components, which don't need to know about the API calls.
         switch (currentUser.role) {
             case 'Admin':
             case 'GB':
