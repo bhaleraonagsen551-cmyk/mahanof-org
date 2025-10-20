@@ -1,0 +1,7 @@
+{
+  "name": "Nursing Officer's Foundation",
+  "description": "A comprehensive portal for a professional association featuring a member dashboard, notifications, news, registration facilities, and various organizational wings.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
